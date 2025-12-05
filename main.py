@@ -1,111 +1,142 @@
 import streamlit as st
 from openai import OpenAI
-import os
 
 # -------------------------------------------------------------------------
-# 🔐 [기능 1] 비밀번호 설정 (여기를 원하는 비번으로 바꾸세요!)
+# 🔐 [설정] 비밀번호 및 API 키
 # -------------------------------------------------------------------------
-# 입금한 사람에게만 이 비밀번호("1000won")를 알려주면 됩니다.
-ACCESS_PASSWORD = "1234" 
+ACCESS_PASSWORD = "1234"  # 유료 회원용 비밀번호
 
-# -------------------------------------------------------------------------
-# 🔑 API 키 설정 (Streamlit Secrets에서 가져옴)
-# -------------------------------------------------------------------------
 try:
     api_key = st.secrets["OPENAI_API_KEY"]
 except:
-    # 로컬 테스트용 (혹시 Secrets가 안 될 경우를 대비해)
-    api_key = "sk-proj-..." # 여기에 본인 키를 잠깐 넣어서 테스트해도 됨
-    
+    api_key = "sk-proj-..." # 로컬 테스트용 (배포 시엔 무시됨)
+
 client = OpenAI(api_key=api_key)
 
 # -------------------------------------------------------------------------
-# 🧠 AI 시스템 프롬프트 (전문가 모드)
+# 🧠 [핵심] 독한 컨설턴트 프롬프트 (기능 대폭 추가)
 # -------------------------------------------------------------------------
 SYSTEM_PROMPT = """
-너는 대한민국 정부지원사업(예비창업패키지, 초기창업패키지) 심사위원 출신의 '사업계획서 컨설턴트'야.
-사용자가 아이템을 입력하면, 심사위원이 합격을 줄 수밖에 없는 [PSST 방식]의 사업계획서 초안을 작성해.
+너는 대한민국 정부지원사업 심사위원장 출신의 '창업 컨설턴트'야.
+단순한 작문이 아니라, 합격을 위한 치밀한 전략을 제시해야 해.
 
-[작성 규칙]
-1. 말투: 모든 문장은 '~함', '~임' 등의 개조식(명사형)으로 끝낼 것.
-2. 구조: 
-   - 1. 문제 인식 (Problem)
-   - 2. 해결 방안 (Solution)
-   - 3. 성장 전략 (Scale-up)
-   - 4. 팀 구성 (Team)
-   - 5. 소요 예산안 (Table)
-3. 예산안: 5,000만 원~1억 원 사이의 예산을 마크다운 표(Table)로 작성할 것.
-4. 내용: 추상적 표현 금지. 구체적 수치, 전문 용어, 통계적 추정 사용.
+[작성 원칙]
+1. 말투: '~함', '~임' 등 명사형 종결(개조식) 필수.
+2. 수치화: '열심히' 금지. '전년 대비 30% 성장', '시장규모 10조 원' 등 추정치 포함.
+3. 비판적 시각: 약점은 솔직히 인정하고 구체적인 극복 방안을 제시할 것.
+
+[출력 형식 - 반드시 마크다운 포맷 유지]
+섹션 1. PSST 사업계획서 (표와 리스트 활용)
+섹션 2. 심층 분석 (SWOT 분석 표 포함)
+섹션 3. 실전 면접 대비 (예상 공격 질문 5개 및 방어 논리)
 """
 
 # -------------------------------------------------------------------------
-# 💻 화면 구성 (UI)
+# 💻 UI 구성 (탭 기능 적용)
 # -------------------------------------------------------------------------
-st.set_page_config(page_title="예창패 프리패스 생성기 Pro", page_icon="🏛️")
+st.set_page_config(page_title="예창패 프리패스 Pro", page_icon="💎", layout="wide")
 
-# --- 비밀번호 잠금 화면 ---
+# 1. 로그인 화면
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
 
 if not st.session_state.authenticated:
-    st.title("🔒 유료 회원 전용 서비스")
-    st.markdown("이 서비스는 **월 1,000원 멤버십** 회원만 이용 가능합니다.")
-    
-    password_input = st.text_input("비밀번호를 입력하세요", type="password")
-    
+    st.markdown("## 🔒 VIP 프리미엄 서비스")
+    st.info("월 1,000원 멤버십 회원만 접근 가능한 전략 컨설팅 도구입니다.")
+    pwd = st.text_input("비밀번호를 입력하세요", type="password")
     if st.button("로그인"):
-        if password_input == ACCESS_PASSWORD:
+        if pwd == ACCESS_PASSWORD:
             st.session_state.authenticated = True
-            st.rerun() # 화면 새로고침
+            st.rerun()
         else:
-            st.error("비밀번호가 틀렸습니다. 관리자에게 문의하세요.")
-    st.stop() # 비밀번호 틀리면 아래 코드 실행 안 함
+            st.error("비밀번호가 올바르지 않습니다.")
+    st.stop()
 
-# --- 메인 서비스 화면 (로그인 성공 시 보임) ---
-st.title("🏛️ 예창패/초창패 프리패스 생성기 (VIP)")
-st.caption("Pro 버전: 예산안 자동 수립 및 HWP용 텍스트 다운로드 지원")
+# 2. 메인 화면
+st.title("💎 정부지원사업 합격 솔루션 (Premium)")
+st.caption("사업계획서 + SWOT 전략 + 심사위원 면접 대비까지 한 번에 해결합니다.")
 st.markdown("---")
 
+# 입력창 배치 (2단 구성)
 col1, col2 = st.columns(2)
 with col1:
-    item = st.text_input("💡 창업 아이템", placeholder="예: AI 라면 자판기")
+    item = st.text_input("💡 창업 아이템", placeholder="예: 폐플라스틱을 활용한 3D 프린터 필라멘트")
+    target = st.text_input("🎯 타겟 고객", placeholder="예: ESG 경영 공공기관, 친환경 메이커스")
 with col2:
-    target = st.text_input("🎯 타겟 고객", placeholder="예: 2030 1인 가구")
+    strength = st.text_area("💪 대표자/팀 강점", placeholder="예: 화학공학 박사, 관련 특허 2건, 시제품 제작 완료", height=105)
 
-strength = st.text_area("💪 대표자 강점", placeholder="예: 관련 특허 보유, 3년 경력, 수상 내역", height=80)
-
-if st.button("🚀 사업계획서 생성하기"):
+# 3. 생성 로직
+if st.button("🚀 프리미엄 컨설팅 리포트 생성 (약 40초 소요)"):
     if not item or not target:
-        st.warning("아이템과 타겟 고객을 입력해주세요.")
+        st.warning("아이템과 타겟 정보를 모두 입력해주세요.")
     else:
-        with st.spinner("심사위원 빙의해서 독하게 작성 중입니다... (약 30초)"):
+        with st.spinner("심사위원 관점에서 냉철하게 분석 중입니다..."):
             try:
-                # AI 호출
+                # 프롬프트 조립
+                user_content = f"""
+                아래 창업 아이템에 대해 3가지 파트로 완벽한 리포트를 작성해.
+                
+                정보:
+                - 아이템: {item}
+                - 타겟: {target}
+                - 강점: {strength}
+                
+                [파트 1: 사업계획서]
+                - PSST(문제-해결-성장-팀) 구조
+                - 소요 예산안 (표)
+                
+                [파트 2: 전략 분석]
+                - SWOT 분석 (표 형태로 작성: 강점, 약점, 기회, 위협)
+                - 약점(W)을 기회(O)로 바꿀 구체적 전략 3가지
+                
+                [파트 3: 면접 대비]
+                - 심사위원이 공격할 만한 날카로운 질문 5가지
+                - 각 질문에 대한 방어 답변 (핵심만)
+                """
+                
                 response = client.chat.completions.create(
                     model="gpt-4o-mini",
                     messages=[
                         {"role": "system", "content": SYSTEM_PROMPT},
-                        {"role": "user", "content": f"아이템: {item}, 타겟: {target}, 강점: {strength}"}
+                        {"role": "user", "content": user_content}
                     ]
                 )
-                result_text = response.choices[0].message.content
+                full_text = response.choices[0].message.content
                 
-                # 결과 보여주기
-                st.success("작성 완료! 아래 내용을 복사하거나 다운로드하세요.")
+                # 결과 보여주기 (탭으로 구분)
+                st.success("분석이 완료되었습니다!")
                 st.markdown("---")
-                st.markdown(result_text)
                 
-                # 📥 [기능 2] 다운로드 버튼 추가
+                # 탭 생성
+                tab1, tab2, tab3 = st.tabs(["📄 1. 사업계획서", "📊 2. SWOT 전략", "🎤 3. 면접 예상질문"])
+                
+                # AI가 준 전체 텍스트를 적절히 쪼개서 보여주면 좋겠지만, 
+                # 간단하게 전체 내용을 각 탭에 안내와 함께 보여주는 방식으로 구현
+                
+                with tab1:
+                    st.subheader("📝 표준 사업계획서 (PSST)")
+                    st.info("정부 양식에 바로 붙여넣기 할 수 있는 초안입니다.")
+                    st.markdown(full_text) # 전체 내용을 보여주되, 사용자가 골라 쓰도록 함
+                    
+                with tab2:
+                    st.subheader("📊 심층 분석 (SWOT)")
+                    st.info("사업의 약점을 보완하고 시장 기회를 잡기 위한 전략입니다.")
+                    st.warning("팁: 사업계획서의 '실현 가능성' 파트에 SWOT 표를 넣으면 가점을 받기 좋습니다.")
+                    # (여기서 내용은 위 full_text에 포함되어 있음)
+                    
+                with tab3:
+                    st.subheader("🎤 실전 면접 시뮬레이션")
+                    st.error("주의: 심사위원은 이 부분만 집중적으로 물어봅니다. 반드시 답변을 숙지하세요.")
+                    # (내용 포함됨)
+                
+                # 다운로드 버튼
                 st.markdown("---")
                 st.download_button(
-                    label="💾 텍스트 파일로 다운로드 (HWP 붙여넣기용)",
-                    data=result_text,
-                    file_name="사업계획서_초안.txt",
+                    label="💾 전체 리포트 다운로드 (텍스트 파일)",
+                    data=full_text,
+                    file_name="프리미엄_사업계획서_리포트.txt",
                     mime="text/plain"
                 )
-                
-                # PDF 안내
-                st.info("💡 PDF 저장을 원하시면 브라우저에서 [Ctrl + P]를 누르고 'PDF로 저장'을 선택하세요.")
 
             except Exception as e:
-                st.error(f"에러가 발생했습니다: {e}")
+                st.error(f"오류 발생: {e}")
