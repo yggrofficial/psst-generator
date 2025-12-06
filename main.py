@@ -1,190 +1,190 @@
 import streamlit as st
 from openai import OpenAI
+import sqlite3
+import pandas as pd
 import time
+from datetime import datetime
 
 # -------------------------------------------------------------------------
 # 🔐 [설정] 비밀번호 및 API 키
 # -------------------------------------------------------------------------
-ACCESS_PASSWORD = "1234"  # 유료 회원용 비밀번호
+ACCESS_PASSWORD = "1234" # 유료 회원용 비밀번호
 
+# GitHub 배포 환경(Secrets)과 로컬 테스트 환경(직접 입력) 모두 호환되게 설정
 try:
     api_key = st.secrets["OPENAI_API_KEY"]
 except:
-    api_key = "sk-proj-..." # 로컬 테스트용
+    api_key = "sk-proj-..." # Replit에서 테스트할 때는 여기에 본인 키를 잠시 넣으세요 (배포 전엔 지우기!)
     
 client = OpenAI(api_key=api_key)
 
 # -------------------------------------------------------------------------
-# 🧠 프롬프트 (추가 정보를 반영하도록 업그레이드)
+# 💾 [핵심] 데이터베이스(DB) 시스템 구축 (SQLite)
 # -------------------------------------------------------------------------
-# 1. 사업계획서 전용
-PROMPT_PSST = """
-너는 정부지원사업 합격 전문 컨설턴트야. 
-사용자의 입력 정보를 바탕으로 [PSST 표준 사업계획서]를 '상세하고 구체적으로' 작성해.
-사용자가 '추가 정보'를 제공했다면, 그 내용을 각 항목에 적절히 녹여내야 해.
+def init_db():
+    conn = sqlite3.connect('startup_data.db')
+    c = conn.cursor()
+    # 테이블이 없으면 생성 (아이템, 타겟, 강점, 점수, 평가, 날짜)
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            item TEXT,
+            target TEXT,
+            strength TEXT,
+            score INTEGER,
+            review TEXT,
+            created_at TIMESTAMP
+        )
+    ''')
+    conn.commit()
+    conn.close()
 
-[필수 구조]
-1. 문제 인식 (Problem): 시장의 페인포인트, 기존 한계
-2. 해결 방안 (Solution): 구체적 기능, 기술적 차별성
-3. 성장 전략 (Scale-up): 자금 확보, 마케팅, 시장 진입 전략
-4. 팀 구성 (Team): 대표자 강점 및 역량
-5. 예산 계획: 5,000만 원~1억 원 기준 예산안 (Table 필수)
+def save_to_db(item, target, strength, score, review):
+    conn = sqlite3.connect('startup_data.db')
+    c = conn.cursor()
+    c.execute('INSERT INTO history (item, target, strength, score, review, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+              (item, target, strength, score, review, datetime.now()))
+    conn.commit()
+    conn.close()
 
-[말투] '~함', '~임' 개조식 명사형 종결.
-"""
+def get_db_stats():
+    conn = sqlite3.connect('startup_data.db')
+    # 데이터프레임으로 읽어오기 (통계 내기 쉬움)
+    try:
+        df = pd.read_sql_query("SELECT * FROM history", conn)
+        conn.close()
+        if df.empty:
+            return 0, 0
+        return len(df), round(df['score'].mean(), 1)
+    except:
+        conn.close()
+        return 0, 0
 
-# 2. SWOT 전용
-PROMPT_SWOT = """
-너는 전략 기획 전문가야. 아이템과 추가 정보를 종합적으로 분석해서 [SWOT 분석]을 수행해.
-1. 강점(S), 약점(W), 기회(O), 위협(T)을 마크다운 표(Table)로 작성.
-2. [전략 도출]: 약점(W)을 기회(O)로 바꿀 구체적 전략 3가지 제시.
-"""
+# 앱 시작할 때 DB 확인
+init_db()
 
-# 3. 면접 전용
-PROMPT_INTERVIEW = """
-너는 까칠한 심사위원이야. 
-특히 사용자가 입력한 '추가 정보'(약점이나 특이사항)가 있다면 그 부분을 집요하게 파고드는 질문을 포함해 5개를 던져.
-각 질문에 대한 합격권 방어 답변도 제시해.
+# -------------------------------------------------------------------------
+# 🧠 [평가 엔진] 합격 확률 분석 프롬프트
+# -------------------------------------------------------------------------
+SYSTEM_PROMPT = """
+너는 대한민국 정부지원사업 심사위원장이야. 
+사용자의 아이템을 냉정하게 평가해서 '합격 확률(점수)'과 '독한 피드백'을 줘.
+
+[출력 형식]
+반드시 아래 형식을 지켜서 답변해. 다른 말 하지 말고.
+
+SCORE: [0~100 사이 숫자만]
+REVIEW: [평가 내용]
+1. 시장성 (점수/25): ...
+2. 기술성 (점수/25): ...
+3. 사업성 (점수/25): ...
+4. 팀역량 (점수/25): ...
+
+[총평]: 합격을 위해 보완해야 할 점 3가지 (개조식)
 """
 
 # -------------------------------------------------------------------------
 # 💻 UI 구성
 # -------------------------------------------------------------------------
-st.set_page_config(page_title="예창패 프리패스 Pro", page_icon="💎", layout="wide")
+st.set_page_config(page_title="예창패 합격 확률 예측기", page_icon="📊", layout="wide")
 
 # [로그인 화면]
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
 
 if not st.session_state.authenticated:
-    st.markdown("## 🔒 VIP 프리미엄 서비스")
-    st.info("월 1,000원 멤버십 회원만 접근 가능한 전략 컨설팅 도구입니다.")
-    pwd = st.text_input("비밀번호를 입력하세요", type="password")
+    st.markdown("## 🔒 데이터 기반 합격 예측 솔루션")
+    st.info("월 1,000원 멤버십 회원 전용입니다.")
+    pwd = st.text_input("비밀번호", type="password")
     if st.button("로그인"):
         if pwd == ACCESS_PASSWORD:
             st.session_state.authenticated = True
             st.rerun()
         else:
-            st.error("비밀번호가 올바르지 않습니다.")
+            st.error("비밀번호 오류")
     st.stop()
 
 # [메인 화면]
-st.title("💎 정부지원사업 합격 솔루션 (Premium)")
-st.caption("디테일한 정보를 입력할수록 합격 확률이 올라갑니다.")
+st.title("📊 정부지원사업 합격 확률 진단 AI")
+
+# --- 데이터 과시 (친구 피드백 반영: DB가 있다는 걸 보여줌) ---
+total_cnt, avg_score = get_db_stats()
+
+st.metric(label="누적 분석 데이터", value=f"{total_cnt}건", delta="실시간 업데이트 중")
+if total_cnt > 0:
+    st.caption(f"현재 지원자들의 평균 점수는 **{avg_score}점**입니다.")
+else:
+    st.caption("아직 데이터가 없습니다. 첫 번째 분석가가 되어보세요!")
+
 st.markdown("---")
 
-# 입력창 배치 (2단 구성 + 하단 추가정보)
 col1, col2 = st.columns(2)
 with col1:
-    item = st.text_input("💡 창업 아이템", placeholder="예: AI 기반 음식물 쓰레기 처리기")
-    target = st.text_input("🎯 타겟 고객", placeholder="예: 3040 주부, 1인 가구")
+    item = st.text_input("💡 창업 아이템", placeholder="예: AI 기반 폐플라스틱 처리기")
+    target = st.text_input("🎯 타겟 고객", placeholder="예: ESG 경영 공공기관")
 with col2:
-    strength = st.text_area("💪 대표자/팀 강점", placeholder="예: 관련 특허 보유, 개발 경력 5년", height=105)
+    strength = st.text_area("💪 대표자/팀 강점", placeholder="예: 관련 특허 1건, 개발 경력 5년", height=105)
 
-# ✨ [신규 기능] 선택 입력칸 추가
-st.markdown("👇 **더 정교한 결과를 원하시면 아래 내용을 적어주세요! (선택)**")
-additional_info = st.text_area(
-    "➕ 추가 상세 정보 (TMI 환영)", 
-    placeholder="예: 현재 매출 월 500만 원 발생 중, 경쟁사 A보다 가격 20% 저렴함, 시제품 제작 완료 상태 등",
-    height=100
-)
+st.markdown("👇 **더 정교한 예측을 위한 추가 정보 (선택)**")
+additional = st.text_area("➕ 현재 진행 상황 (매출, MOU, 시제품 유무 등)", height=80)
 
-# [실행 로직]
-if st.button("🚀 프리미엄 컨설팅 시작 (클릭)"):
+if st.button("🚀 내 합격 확률 무료 진단하기"):
     if not item or not target:
-        st.warning("기본 정보(아이템, 타겟)는 필수입니다.")
+        st.warning("아이템과 타겟은 필수입니다.")
     else:
-        # AI에게 보낼 통합 정보 만들기
-        user_input_combined = f"""
-        1. 아이템: {item}
-        2. 타겟: {target}
-        3. 강점: {strength}
-        """
+        user_input = f"아이템:{item}, 타겟:{target}, 강점:{strength}, 추가정보:{additional}"
         
-        # 추가 정보가 있으면 내용에 덧붙이기
-        if additional_info:
-            user_input_combined += f"\n4. 추가 상세 정보(중요): {additional_info}"
-
-        # 결과를 저장할 변수들
-        psst_result = ""
-        swot_result = ""
-        interview_result = ""
-        
-        with st.status("🤖 전문가가 꼼꼼하게 분석 중입니다...", expanded=True) as status:
+        with st.spinner("빅데이터 기준으로 냉철하게 분석 중입니다..."):
             try:
-                # 1단계
-                st.write("1단계: 사업계획서 작성 중 (추가 정보 반영)...")
-                response1 = client.chat.completions.create(
+                # 1. AI 평가 요청
+                response = client.chat.completions.create(
                     model="gpt-4o-mini",
                     messages=[
-                        {"role": "system", "content": PROMPT_PSST},
-                        {"role": "user", "content": user_input_combined}
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": user_input}
                     ]
                 )
-                psst_result = response1.choices[0].message.content
-                st.write("✅ 사업계획서 완료!")
+                full_text = response.choices[0].message.content
                 
-                # 2단계
-                st.write("2단계: SWOT 전략 수립 중...")
-                response2 = client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[
-                        {"role": "system", "content": PROMPT_SWOT},
-                        {"role": "user", "content": f"아이템 및 정보: {user_input_combined} -> SWOT 분석해줘"}
-                    ]
-                )
-                swot_result = response2.choices[0].message.content
-                st.write("✅ SWOT 분석 완료!")
-
-                # 3단계
-                st.write("3단계: 압박 면접 질문 생성 중...")
-                response3 = client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[
-                        {"role": "system", "content": PROMPT_INTERVIEW},
-                        {"role": "user", "content": f"아이템 및 정보: {user_input_combined} -> 면접 질문 뽑아줘"}
-                    ]
-                )
-                interview_result = response3.choices[0].message.content
-                st.write("✅ 면접 대비 완료!")
+                # 2. 결과 파싱 (점수와 내용 분리)
+                score = 0
+                review_content = full_text
                 
-                status.update(label="🎉 분석이 끝났습니다!", state="complete", expanded=False)
+                if "SCORE:" in full_text:
+                    parts = full_text.split("REVIEW:")
+                    score_part = parts[0].replace("SCORE:", "").strip()
+                    # 숫자가 아닌 문자가 섞여있을 경우 대비
+                    import re
+                    numbers = re.findall(r'\d+', score_part)
+                    if numbers:
+                        score = int(numbers[0])
+                    
+                    review_content = parts[1].strip() if len(parts) > 1 else full_text
+                
+                # 3. DB에 저장 (이게 자산화!)
+                save_to_db(item, target, strength, score, review_content)
+                
+                # 4. 결과 보여주기
+                st.success("분석 완료! 데이터베이스에 저장되었습니다.")
+                
+                # 점수 시각화
+                st.markdown(f"### 📈 당신의 합격 확률: **{score}%**")
+                my_bar = st.progress(0)
+                for percent_complete in range(score):
+                    time.sleep(0.01)
+                    my_bar.progress(percent_complete + 1)
+                
+                # 피드백 내용
+                st.markdown("---")
+                st.subheader("📝 심사위원 직설 피드백")
+                st.markdown(review_content)
+                
+                # 비교 분석 (내 점수 vs 평균 점수)
+                if total_cnt > 0:
+                    if score > avg_score:
+                        st.info(f"🎉 축하합니다! 평균({avg_score}점)보다 **{round(score - avg_score, 1)}점** 높습니다.")
+                    else:
+                        st.warning(f"⚠️ 평균({avg_score}점)보다 낮습니다. 위 피드백을 반영해 보완하세요.")
 
             except Exception as e:
-                st.error(f"에러 발생: {e}")
-                st.stop()
-
-        # [결과 출력]
-        st.success("작성 완료! 추가하신 정보가 반영되었습니다.")
-        
-        tab1, tab2, tab3 = st.tabs(["📄 1. 상세 사업계획서", "📊 2. SWOT 전략", "🎤 3. 면접 예상질문"])
-        
-        with tab1:
-            st.markdown(psst_result)
-        with tab2:
-            st.markdown(swot_result)
-        with tab3:
-            st.markdown(interview_result)
-            
-        # [다운로드]
-        full_report = f"""
-[예창패 프리패스 AI 리포트 (Pro)]
-*반영된 추가정보: {additional_info if additional_info else '없음'}
-
---- 1. 상세 사업계획서 ---
-{psst_result}
-
---- 2. SWOT 분석 및 전략 ---
-{swot_result}
-
---- 3. 면접 예상 질문 및 답변 ---
-{interview_result}
-        """
-        
-        st.markdown("---")
-        st.download_button(
-            label="💾 전체 리포트 다운로드",
-            data=full_report,
-            file_name="사업계획서_Full.txt",
-            mime="text/plain"
-        )
+                st.error(f"분석 중 오류 발생: {e}")
