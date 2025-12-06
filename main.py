@@ -4,34 +4,47 @@ import sqlite3
 import pandas as pd
 import time
 from datetime import datetime
+import re
+import os
 
 # -------------------------------------------------------------------------
-# 🔐 [설정] 비밀번호 및 API 키
+# 🚨 [필수] 페이지 설정 (무조건 맨 위)
 # -------------------------------------------------------------------------
-ACCESS_PASSWORD = "1234" # 유료 회원용 비밀번호
+st.set_page_config(page_title="예창패 모의 심사위원", page_icon="⚖️", layout="wide")
 
-# GitHub 배포 환경(Secrets)과 로컬 테스트 환경(직접 입력) 모두 호환되게 설정
+# -------------------------------------------------------------------------
+# 🔐 [설정] 비밀번호 및 API 키 관리
+# -------------------------------------------------------------------------
+ACCESS_PASSWORD = "1234"  # 유료 회원용 비밀번호
+
 try:
-    api_key = st.secrets["OPENAI_API_KEY"]
+    # 1. Streamlit Cloud 배포 환경 (Secrets)
+    if "OPENAI_API_KEY" in st.secrets:
+        api_key = st.secrets["OPENAI_API_KEY"]
+    else:
+        # secrets.toml 파일이 없으면 에러 발생 -> except로 이동
+        raise ValueError("Secrets not found")
 except:
-    api_key = "sk-proj-..." # Replit에서 테스트할 때는 여기에 본인 키를 잠시 넣으세요 (배포 전엔 지우기!)
-    
+    # 2. Replit 테스트 환경 (본인 키 입력 필요)
+    # ⚠️ 테스트할 때만 본인 키를 넣고, GitHub 배포 전에는 지우는 게 안전함
+    api_key = "비워둠" 
+
 client = OpenAI(api_key=api_key)
 
 # -------------------------------------------------------------------------
-# 💾 [핵심] 데이터베이스(DB) 시스템 구축 (SQLite)
+# 💾 [핵심] 데이터베이스(DB) - 평가 이력 저장
 # -------------------------------------------------------------------------
 def init_db():
     conn = sqlite3.connect('startup_data.db')
     c = conn.cursor()
-    # 테이블이 없으면 생성 (아이템, 타겟, 강점, 점수, 평가, 날짜)
+    # 테이블: 아이템명, 본문, 점수, 독창성점수, 리뷰, 날짜
     c.execute('''
-        CREATE TABLE IF NOT EXISTS history (
+        CREATE TABLE IF NOT EXISTS evaluation_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            item TEXT,
-            target TEXT,
-            strength TEXT,
+            item_name TEXT,
+            full_text TEXT,
             score INTEGER,
+            originality INTEGER,
             review TEXT,
             created_at TIMESTAMP
         )
@@ -39,19 +52,21 @@ def init_db():
     conn.commit()
     conn.close()
 
-def save_to_db(item, target, strength, score, review):
+def save_to_db(item_name, full_text, score, originality, review):
     conn = sqlite3.connect('startup_data.db')
     c = conn.cursor()
-    c.execute('INSERT INTO history (item, target, strength, score, review, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-              (item, target, strength, score, review, datetime.now()))
+    try:
+        c.execute('INSERT INTO evaluation_history (item_name, full_text, score, originality, review, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+                  (item_name, full_text, score, originality, review, datetime.now()))
+    except:
+        pass
     conn.commit()
     conn.close()
 
 def get_db_stats():
     conn = sqlite3.connect('startup_data.db')
-    # 데이터프레임으로 읽어오기 (통계 내기 쉬움)
     try:
-        df = pd.read_sql_query("SELECT * FROM history", conn)
+        df = pd.read_sql_query("SELECT * FROM evaluation_history", conn)
         conn.close()
         if df.empty:
             return 0, 0
@@ -60,41 +75,57 @@ def get_db_stats():
         conn.close()
         return 0, 0
 
-# 앱 시작할 때 DB 확인
 init_db()
 
 # -------------------------------------------------------------------------
-# 🧠 [평가 엔진] 합격 확률 분석 프롬프트
+# 🧠 [심사 엔진] PSST + 독창성(표절) 검사 프롬프트
 # -------------------------------------------------------------------------
 SYSTEM_PROMPT = """
-너는 대한민국 정부지원사업 심사위원장이야. 
-사용자의 아이템을 냉정하게 평가해서 '합격 확률(점수)'과 '독한 피드백'을 줘.
+너는 대한민국 정부지원사업(예비창업패키지)의 최종 심사위원장이야.
+사용자가 제출한 사업계획서를 읽고 [합격 점수]와 [독창성(표절 위험도)]를 냉정하게 평가해.
+
+[평가 기준 1: PSST (합격 점수)]
+1. Problem (문제인식)
+2. Solution (해결방안)
+3. Scale-up (성장전략)
+4. Team (팀 구성)
+
+[평가 기준 2: 독창성 (Originality)]
+- 문장이 너무 일반적이거나(Cliché), 챗GPT가 쓴 티가 많이 나면 독창성 점수를 낮게 줄 것 (50점 미만).
+- 구체적인 수치, 고유 명사, 경험담이 있으면 독창성 점수를 높게 줄 것.
 
 [출력 형식]
-반드시 아래 형식을 지켜서 답변해. 다른 말 하지 말고.
+반드시 아래 형식을 지켜라. 다른 사족 달지 마라.
+SCORE: [0~100 숫자]
+ORIGINALITY: [0~100 숫자]
+REVIEW:
+## 📊 심사 요약
+- **종합 점수**: 00점
+- **독창성 지수**: 00% (높을수록 좋음)
 
-SCORE: [0~100 사이 숫자만]
-REVIEW: [평가 내용]
-1. 시장성 (점수/25): ...
-2. 기술성 (점수/25): ...
-3. 사업성 (점수/25): ...
-4. 팀역량 (점수/25): ...
+## 🛑 독창성/표절 유사도 검토
+- [AI가 판단한 독창성 평가 멘트]
 
-[총평]: 합격을 위해 보완해야 할 점 3가지 (개조식)
+## 💡 항목별 상세 피드백
+- **문제인식**: [평가]
+- **해결방안**: [평가]
+- **성장전략**: [평가]
+- **팀 구 성**: [평가]
+
+## 🎯 총평 및 보완점
+- ...
 """
 
 # -------------------------------------------------------------------------
 # 💻 UI 구성
 # -------------------------------------------------------------------------
-st.set_page_config(page_title="예창패 합격 확률 예측기", page_icon="📊", layout="wide")
-
 # [로그인 화면]
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
 
 if not st.session_state.authenticated:
-    st.markdown("## 🔒 데이터 기반 합격 예측 솔루션")
-    st.info("월 1,000원 멤버십 회원 전용입니다.")
+    st.markdown("## ⚖️ AI 모의 심사 & 표절 탐지기")
+    st.info("작성하신 사업계획서의 합격 확률과 독창성을 진단해 드립니다. (유료 회원 전용)")
     pwd = st.text_input("비밀번호", type="password")
     if st.button("로그인"):
         if pwd == ACCESS_PASSWORD:
@@ -105,86 +136,88 @@ if not st.session_state.authenticated:
     st.stop()
 
 # [메인 화면]
-st.title("📊 정부지원사업 합격 확률 진단 AI")
+st.title("⚖️ 정부지원사업 AI 모의 심사장")
+st.caption("ChatGPT로 쓴 사업계획서, 표절 의심 받을까? AI 심사위원이 미리 채점해 드립니다.")
 
-# --- 데이터 과시 (친구 피드백 반영: DB가 있다는 걸 보여줌) ---
+# 통계 표시
 total_cnt, avg_score = get_db_stats()
-
-st.metric(label="누적 분석 데이터", value=f"{total_cnt}건", delta="실시간 업데이트 중")
+col_a, col_b = st.columns(2)
+col_a.metric("누적 심사 건수", f"{total_cnt}건")
 if total_cnt > 0:
-    st.caption(f"현재 지원자들의 평균 점수는 **{avg_score}점**입니다.")
-else:
-    st.caption("아직 데이터가 없습니다. 첫 번째 분석가가 되어보세요!")
+    col_b.metric("평균 합격 점수", f"{avg_score}점")
 
 st.markdown("---")
 
-col1, col2 = st.columns(2)
-with col1:
-    item = st.text_input("💡 창업 아이템", placeholder="예: AI 기반 폐플라스틱 처리기")
-    target = st.text_input("🎯 타겟 고객", placeholder="예: ESG 경영 공공기관")
-with col2:
-    strength = st.text_area("💪 대표자/팀 강점", placeholder="예: 관련 특허 1건, 개발 경력 5년", height=105)
+# 입력 폼
+item_name = st.text_input("💡 창업 아이템명 (식별용)", placeholder="예: 시각장애인용 AI 안내견 앱")
+st.markdown("👇 **작성하신 사업계획서 내용을 아래에 붙여넣어 주세요.** (HWP/PDF 내용 복사)")
+full_plan = st.text_area("사업계획서 본문", height=300, placeholder="1. 문제 인식\n현재 시장은...\n\n2. 해결 방안\n우리는 이를 AI 기술로...\n(내용을 길게 넣을수록 정확한 심사가 가능합니다)")
 
-st.markdown("👇 **더 정교한 예측을 위한 추가 정보 (선택)**")
-additional = st.text_area("➕ 현재 진행 상황 (매출, MOU, 시제품 유무 등)", height=80)
-
-if st.button("🚀 내 합격 확률 무료 진단하기"):
-    if not item or not target:
-        st.warning("아이템과 타겟은 필수입니다.")
+# [실행 로직]
+if st.button("🚀 모의 심사 및 표절 검사 시작"):
+    if not item_name or len(full_plan) < 50:
+        st.warning("아이템명과 사업계획서 내용을 충분히 입력해주세요 (최소 50자 이상).")
     else:
-        user_input = f"아이템:{item}, 타겟:{target}, 강점:{strength}, 추가정보:{additional}"
-        
-        with st.spinner("빅데이터 기준으로 냉철하게 분석 중입니다..."):
+        with st.spinner("심사위원들이 귀하의 사업계획서를 검토 중입니다..."):
             try:
                 # 1. AI 평가 요청
                 response = client.chat.completions.create(
                     model="gpt-4o-mini",
                     messages=[
                         {"role": "system", "content": SYSTEM_PROMPT},
-                        {"role": "user", "content": user_input}
+                        {"role": "user", "content": f"아이템명: {item_name}\n\n[사업계획서 내용]\n{full_plan}"}
                     ]
                 )
                 full_text = response.choices[0].message.content
-                
-                # 2. 결과 파싱 (점수와 내용 분리)
+
+                # 2. 결과 파싱 (점수와 독창성 분리)
                 score = 0
+                originality = 0
                 review_content = full_text
-                
+
+                # SCORE 파싱
                 if "SCORE:" in full_text:
-                    parts = full_text.split("REVIEW:")
+                    parts = full_text.split("ORIGINALITY:")
                     score_part = parts[0].replace("SCORE:", "").strip()
-                    # 숫자가 아닌 문자가 섞여있을 경우 대비
-                    import re
                     numbers = re.findall(r'\d+', score_part)
                     if numbers:
                         score = int(numbers[0])
-                    
-                    review_content = parts[1].strip() if len(parts) > 1 else full_text
-                
-                # 3. DB에 저장 (이게 자산화!)
-                save_to_db(item, target, strength, score, review_content)
-                
-                # 4. 결과 보여주기
-                st.success("분석 완료! 데이터베이스에 저장되었습니다.")
-                
-                # 점수 시각화
-                st.markdown(f"### 📈 당신의 합격 확률: **{score}%**")
-                my_bar = st.progress(0)
-                for percent_complete in range(score):
-                    time.sleep(0.01)
-                    my_bar.progress(percent_complete + 1)
-                
-                # 피드백 내용
+
+                    # ORIGINALITY 파싱
+                    if len(parts) > 1:
+                        orig_parts = parts[1].split("REVIEW:")
+                        orig_num_part = orig_parts[0].strip()
+                        orig_numbers = re.findall(r'\d+', orig_num_part)
+                        if orig_numbers:
+                            originality = int(orig_numbers[0])
+
+                        review_content = orig_parts[1].strip() if len(orig_parts) > 1 else full_text
+
+                # 3. DB 저장
+                save_to_db(item_name, full_plan, score, originality, review_content)
+
+                # 4. 결과 화면 출력
+                st.success("심사가 완료되었습니다.")
+
+                st.markdown("### 🏆 심사 결과 리포트")
+
+                # 메트릭 시각화
+                m_col1, m_col2 = st.columns(2)
+                m_col1.metric("종합 합격 점수", f"{score}점")
+                m_col2.metric("독창성(표절 안전도)", f"{originality}%", 
+                              delta="안전" if originality >= 70 else "위험",
+                              delta_color="normal" if originality >= 70 else "inverse")
+
+                # 독창성 경고 메시지
+                if originality < 50:
+                    st.error("🚨 **[표절/양산형 경고]** 내용이 너무 일반적입니다. 구체적인 경험이나 데이터를 추가하여 보완하세요.")
+                elif originality < 70:
+                    st.warning("⚠️ **[주의]** 독창성이 다소 부족합니다. 차별점을 더 강조하세요.")
+                else:
+                    st.success("✅ **[독창성 통과]** 고유한 내용이 잘 포함되어 있습니다.")
+
                 st.markdown("---")
-                st.subheader("📝 심사위원 직설 피드백")
                 st.markdown(review_content)
-                
-                # 비교 분석 (내 점수 vs 평균 점수)
-                if total_cnt > 0:
-                    if score > avg_score:
-                        st.info(f"🎉 축하합니다! 평균({avg_score}점)보다 **{round(score - avg_score, 1)}점** 높습니다.")
-                    else:
-                        st.warning(f"⚠️ 평균({avg_score}점)보다 낮습니다. 위 피드백을 반영해 보완하세요.")
 
             except Exception as e:
-                st.error(f"분석 중 오류 발생: {e}")
+                st.error(f"심사 중 오류 발생: {e}")
